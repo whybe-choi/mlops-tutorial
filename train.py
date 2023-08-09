@@ -1,12 +1,39 @@
 import uuid
 import mlflow
 import optuna
-from sklearn.datasets import load_iris
+import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
+from minio import Minio
 
 UNIQUE_PREFIX = str(uuid.uuid4())[:8]
+BUCKET_NAME = 'raw-data'
+OBJECT_NAME = 'iris'
+
+def download_data():
+    #
+    # minio client
+    #
+    url = '0.0.0.0:9000'
+    access_key = 'minio'
+    secret_key = 'miniostorage'
+    client = Minio(url, access_key=access_key, secret_key=secret_key, secure=False)
+
+    #
+    # download data
+    #
+    object_stat = client.stat_object(BUCKET_NAME, OBJECT_NAME)
+    data_version_id = object_stat.version_id
+    client.fget_object(BUCKET_NAME, OBJECT_NAME, 'download_data.csv')
+    return data_version_id
+
+def load_data():
+    data_version_id = download_data()
+    df = pd.read_csv("download_data.csv")
+    X, y = df.drop(columns=["target"]), df["target"]
+    data_dict = {"data": X, "target": y, "version_id": data_version_id} 
+    return data_dict
 
 def objective(trial):
     #
@@ -24,8 +51,11 @@ def objective(trial):
         #
         # load data
         #
-        iris = load_iris(as_frame=True)
-        X, y = iris['data'], iris['target']
+        data_dict = load_data()
+        mlflow.log_param("bucket_name", BUCKET_NAME)
+        mlflow.log_param("object_name", OBJECT_NAME)
+        mlflow.log_param("version_id", data_dict["version_id"])
+        X, y = data_dict['data'], data_dict['target']
         X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.3, random_state=2024)
 
         #
@@ -46,6 +76,31 @@ def objective(trial):
         mlflow.log_metric("accuracy", acc_score)
     return acc_score
 
+def train_best_model(params):
+    run_name = f"{UNIQUE_PREFIX}-best-model"
+    with mlflow.start_run(run_name=run_name):
+        #
+        # log parameters
+        #
+        mlflow.log_params(params)
+
+        #
+        # load data
+        #
+        data_dict = load_data()
+        mlflow.log_param("bucket_name", BUCKET_NAME)
+        mlflow.log_param("object_name", OBJECT_NAME)
+        mlflow.log_param("version_id", data_dict["version_id"])
+        X, y = data_dict['data'], data_dict['target']
+
+        #
+        # train model
+        #
+        clf = RandomForestClassifier(n_estimators=params["n_estimators"], max_depth=params["max_depth"], random_state=2024)
+        clf.fit(X, y)
+
+        return clf
+
 if __name__ == "__main__":
     #
     # set mlflow
@@ -60,3 +115,6 @@ if __name__ == "__main__":
 
     #optimize
     study.optimize(objective, n_trials=5)
+
+    params = study.best_params
+    best_clf = train_best_model(params)
